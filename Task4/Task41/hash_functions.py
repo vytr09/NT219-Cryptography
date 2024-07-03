@@ -1,7 +1,13 @@
 import hashlib
 import argparse
 import timeit
-from Crypto.Hash import SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE128, SHAKE256
+import platform
+
+# Conditional import based on the operating system
+if platform.system() == 'Windows':
+    from Crypto.Hash import SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE128, SHAKE256
+else:
+    from Cryptodome.Hash import SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE128, SHAKE256
 
 def hash_data(data, algorithm, digest_length=None):
     try:
@@ -84,7 +90,7 @@ def main():
             print(f'Hash result: {result}')
 
 def run_benchmark():
-    input_sizes = [10**6, 10**7, 10**8, 10**9, 2*(10**9)]
+    input_sizes = [10**6, 2*(10**6), 10**7, 10**8, 10**9]
     algorithms = ['sha224', 'sha256', 'sha384', 'sha512', 'sha3_224', 'sha3_256', 'sha3_384', 'sha3_512', 'shake128', 'shake256']
     results = []
 
@@ -92,15 +98,16 @@ def run_benchmark():
         input_data = 'a' * size
         for algorithm in algorithms:
             if 'shake' in algorithm:
-                t = timeit.timeit(lambda: hash_data(input_data, algorithm, digest_length=256), number=1000)
+                total_time = timeit.timeit(lambda: hash_data(input_data, algorithm, digest_length=256), number=1000)
             else:
-                t = timeit.timeit(lambda: hash_data(input_data, algorithm), number=1000)
-            results.append((algorithm, size, t))
-            print(f'Algorithm: {algorithm}, Input Size: {size}, Time: {t}')
+                total_time = timeit.timeit(lambda: hash_data(input_data, algorithm), number=1000)
+            average_time = total_time / 1000
+            results.append((algorithm, size, average_time))
+            print(f'Algorithm: {algorithm}, Input Size: {size}, Average Time: {average_time}')
 
     with open('performance_results.txt', 'w', encoding='utf-8') as f:
         for result in results:
-            f.write(f'Algorithm: {result[0]}, Input Size: {result[1]}, Time: {result[2]}\n')
+            f.write(f'Algorithm: {result[0]}, Input Size: {result[1]}, Average Time: {result[2]}\n')
 
 if __name__ == '__main__':
     main()
