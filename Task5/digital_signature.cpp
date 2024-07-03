@@ -12,9 +12,9 @@
 #include <chrono>
 
 extern "C" {
-    bool generateKeys(const char* keyType, const char* curveOrKeySize, const char* publicKeyPath, const char* privateKeyPath);
-    bool sign(const char* privateKeyPath, const char* messagePath, const char* signaturePath, const char* algorithm);
-    bool verifySignature(const char* publicKeyPath, const char* messagePath, const char* signaturePath, const char* algorithm);
+    __declspec(dllexport) bool generateKeys(const char* keyType, const char* curveOrKeySize, const char* publicKeyPath, const char* privateKeyPath);
+    __declspec(dllexport) bool sign(const char* privateKeyPath, const char* messagePath, const char* signaturePath, const char* algorithm);
+    __declspec(dllexport) bool verifySignature(const char* publicKeyPath, const char* messagePath, const char* signaturePath, const char* algorithm);
 }
 
 int getCurveNID(const char* curve) {
@@ -30,7 +30,6 @@ int getCurveNID(const char* curve) {
     if (std::strcmp(curve, "sect233k1") == 0) return NID_sect233k1;
     return 0; // Invalid curve
 }
-
 
 bool generateKeys(const char* keyType, const char* curveOrKeySize, const char* publicKeyPath, const char* privateKeyPath) {
     OpenSSL_add_all_algorithms();
@@ -48,6 +47,7 @@ bool generateKeys(const char* keyType, const char* curveOrKeySize, const char* p
         pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
         if (!pctx || EVP_PKEY_keygen_init(pctx) <= 0 || EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, curveNID) <= 0) {
             std::cerr << "Error initializing ECDSA key generation context." << std::endl;
+            ERR_print_errors_fp(stderr);
             return false;
         }
     } else if (std::strcmp(keyType, "RSAPSS") == 0) {
@@ -59,6 +59,7 @@ bool generateKeys(const char* keyType, const char* curveOrKeySize, const char* p
         pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
         if (!pctx || EVP_PKEY_keygen_init(pctx) <= 0 || EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, keySize) <= 0) {
             std::cerr << "Error initializing RSAPSS key generation context." << std::endl;
+            ERR_print_errors_fp(stderr);
             return false;
         }
     } else {
@@ -68,6 +69,7 @@ bool generateKeys(const char* keyType, const char* curveOrKeySize, const char* p
 
     if (EVP_PKEY_keygen(pctx, &pkey) <= 0) {
         std::cerr << "Error generating keys." << std::endl;
+        ERR_print_errors_fp(stderr);
         EVP_PKEY_CTX_free(pctx);
         return false;
     }
@@ -92,10 +94,11 @@ bool generateKeys(const char* keyType, const char* curveOrKeySize, const char* p
 bool sign(const char* privateKeyPath, const char* messagePath, const char* signaturePath, const char* algorithm) {
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
-
+    
     // Read the private key from file
-    BIO* keyData = BIO_new_file(privateKeyPath, "r");
-    EVP_PKEY* privateKey = PEM_read_bio_PrivateKey(keyData, NULL, NULL, NULL);
+    BIO *keyData = BIO_new(BIO_s_file());
+    BIO_read_filename(keyData, privateKeyPath);
+    EVP_PKEY *privateKey = PEM_read_bio_PrivateKey(keyData, NULL, NULL, NULL);
     BIO_free(keyData);
     if (!privateKey) {
         std::cerr << "Error reading private key." << std::endl;
@@ -103,49 +106,56 @@ bool sign(const char* privateKeyPath, const char* messagePath, const char* signa
         return false;
     }
 
+    // Create a buffer to hold the document hash
+    unsigned char hashsize[SHA512_DIGEST_LENGTH]; //output size for hash function 512 bits
     // Read input message (binary)
-    std::ifstream messageFile(messagePath, std::ios::binary);
-    std::vector<unsigned char> messageContents((std::istreambuf_iterator<char>(messageFile)), std::istreambuf_iterator<char>());
-    messageFile.close();
-
-    // Create a hash of the message
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(&messageContents[0], messageContents.size(), hash);
-
-    // Sign the hash
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (std::strcmp(algorithm, "ECDSA") == 0) {
-        EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, privateKey);
-    } else if (std::strcmp(algorithm, "RSAPSS") == 0) {
-        EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, privateKey);
-        EVP_PKEY_CTX* pctx = EVP_MD_CTX_pkey_ctx(ctx);
-        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING);
-    } else {
-        std::cerr << "Invalid algorithm. Supported algorithms: ECDSA, RSAPSS" << std::endl;
-        EVP_MD_CTX_free(ctx);
-        EVP_PKEY_free(privateKey);
+    std::ifstream pdfFile(messagePath, std::ios::binary);
+    if (!pdfFile.is_open()) {
+        std::cerr << "Error opening file." << std::endl;
+        ERR_print_errors_fp(stderr);
         return false;
     }
+    // Char is 1 byte, so we can read the file byte by byte
+    std::vector<unsigned char> pdfContents((std::istreambuf_iterator<char>(pdfFile)), std::istreambuf_iterator<char>());
+    pdfFile.close();
 
-    EVP_DigestSignUpdate(ctx, hash, SHA256_DIGEST_LENGTH);
-    size_t signatureLen;
-    EVP_DigestSignFinal(ctx, NULL, &signatureLen);
+    // Setting hash for the file
+    std::cout << "Hashing file" << std::endl;
+    SHA512(&pdfContents[0], pdfContents.size(), hashsize);
+
+    // Sign the hash
+    std::cout << "Signing the hash" << std::endl;
+    EVP_MD_CTX *hash = EVP_MD_CTX_new();
+    EVP_SignInit(hash, EVP_sha512()); //Initilize sing function void EVP_SignInit(EVP_MD_CTX *ctx, const EVP_MD *type);
+    // SHA512 can use 512, 256, 224 bits
+    EVP_SignUpdate(hash, hashsize, SHA512_DIGEST_LENGTH);
+    
+    //Convert key to bytes
+    unsigned int signatureLen = EVP_PKEY_size(privateKey);
+    // len(n) + len(p)
     std::vector<unsigned char> signature(signatureLen);
-    EVP_DigestSignFinal(ctx, &signature[0], &signatureLen);
 
+    if (!EVP_SignFinal(hash, &signature[0], &signatureLen, privateKey)) {
+        std::cerr << "Error signing file." << std::endl;
+        ERR_print_errors_fp(stderr);
+        EVP_MD_CTX_free(hash);
+        EVP_PKEY_free(privateKey);
+        EVP_cleanup();
+        ERR_free_strings();
+        return false;
+    }
     // Write the signature to a file
+    std::cout << "Writing the signature to file: " << signaturePath << std::endl;
     std::ofstream signatureFile(signaturePath, std::ios::binary);
     if (!signatureFile.is_open()) {
         std::cerr << "Error opening signature file." << std::endl;
-        EVP_MD_CTX_free(ctx);
-        EVP_PKEY_free(privateKey);
+        ERR_print_errors_fp(stderr);
         return false;
     }
     signatureFile.write(reinterpret_cast<const char*>(&signature[0]), signatureLen);
     signatureFile.close();
-
     // Clean up
-    EVP_MD_CTX_free(ctx);
+    EVP_MD_CTX_free(hash);
     EVP_PKEY_free(privateKey);
     EVP_cleanup();
     ERR_free_strings();
@@ -156,54 +166,75 @@ bool verifySignature(const char* publicKeyPath, const char* messagePath, const c
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
 
-    // Read the public key from file
-    BIO* keyData = BIO_new_file(publicKeyPath, "r");
-    EVP_PKEY* publicKey = PEM_read_bio_PUBKEY(keyData, NULL, NULL, NULL);
-    BIO_free(keyData);
+    bool result = false;
+
+    // Load the public key (PEM) using BIO
+    BIO *pubData = BIO_new(BIO_s_file());
+    if (BIO_read_filename(pubData, publicKeyPath) <= 0) {
+        std::cerr << "Error opening public key file." << std::endl;
+        ERR_print_errors_fp(stderr);
+        BIO_free(pubData);
+        return false;
+    }
+    EVP_PKEY* publicKey = PEM_read_bio_PUBKEY(pubData, NULL, NULL, NULL);
+    BIO_free(pubData);
+
     if (!publicKey) {
-        std::cerr << "Error reading public key." << std::endl;
+        std::cerr << "Error loading public key." << std::endl;
         ERR_print_errors_fp(stderr);
         return false;
     }
 
-    // Read input message (binary)
-    std::ifstream messageFile(messagePath, std::ios::binary);
-    std::vector<unsigned char> messageContents((std::istreambuf_iterator<char>(messageFile)), std::istreambuf_iterator<char>());
-    messageFile.close();
-
-    // Create a hash of the message
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    SHA256(&messageContents[0], messageContents.size(), hash);
-
-    // Read the signature
-    std::ifstream signatureFile(signaturePath, std::ios::binary);
-    std::vector<unsigned char> signature((std::istreambuf_iterator<char>(signatureFile)), std::istreambuf_iterator<char>());
-    signatureFile.close();
-
-    // Verify the signature
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-    if (std::strcmp(algorithm, "ECDSA") == 0) {
-        EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, publicKey);
-    } else if (std::strcmp(algorithm, "RSAPSS") == 0) {
-        EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, publicKey);
-        EVP_PKEY_CTX* pctx = EVP_MD_CTX_pkey_ctx(ctx);
-        EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING);
-    } else {
-        std::cerr << "Invalid algorithm. Supported algorithms: ECDSA, RSAPSS" << std::endl;
-        EVP_MD_CTX_free(ctx);
+    // Load the message
+    std::ifstream pdfFile(messagePath, std::ios::binary);
+    if (!pdfFile) {
+        std::cerr << "Error opening message file." << std::endl;
+        ERR_print_errors_fp(stderr);
         EVP_PKEY_free(publicKey);
         return false;
     }
 
-    EVP_DigestVerifyUpdate(ctx, hash, SHA256_DIGEST_LENGTH);
-    int result = EVP_DigestVerifyFinal(ctx, &signature[0], signature.size());
+    std::vector<unsigned char> pdfContents((std::istreambuf_iterator<char>(pdfFile)), std::istreambuf_iterator<char>());
+    pdfFile.close();
+
+    // Load the signature
+    std::ifstream signatureFile(signaturePath, std::ios::binary);
+    if (!signatureFile) {
+        std::cerr << "Error opening signature file." << std::endl;
+        ERR_print_errors_fp(stderr);
+        EVP_PKEY_free(publicKey);
+        return false;
+    }
+
+    std::vector<unsigned char> signature((std::istreambuf_iterator<char>(signatureFile)), std::istreambuf_iterator<char>());
+    signatureFile.close();
+
+    // Verify the signature
+    EVP_MD_CTX *hash = EVP_MD_CTX_new();
+    if (!hash) {
+        std::cerr << "Error creating EVP_MD_CTX." << std::endl;
+        ERR_print_errors_fp(stderr);
+        EVP_PKEY_free(publicKey);
+        return false;
+    }
+
+    if (EVP_DigestVerifyInit(hash, NULL, EVP_sha512(), NULL, publicKey) != 1) {
+        std::cerr << "Error during verification initialization." << std::endl;
+        ERR_print_errors_fp(stderr);
+    } else if (EVP_DigestVerifyUpdate(hash, pdfContents.data(), pdfContents.size()) != 1) {
+        std::cerr << "Error during verification update." << std::endl;
+        ERR_print_errors_fp(stderr);
+    } else {
+        result = EVP_DigestVerifyFinal(hash, signature.data(), signature.size()) == 1;
+    }
 
     // Clean up
-    EVP_MD_CTX_free(ctx);
+    EVP_MD_CTX_free(hash);
     EVP_PKEY_free(publicKey);
     EVP_cleanup();
     ERR_free_strings();
-    return result == 1;
+
+    return result;
 }
 
 double measureSigningPerformance(const char* privateKeyPath, const char* messagePath, const char* signaturePath, const char* algorithm, int iterations) {
